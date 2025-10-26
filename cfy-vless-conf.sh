@@ -16,7 +16,7 @@ TARGET_COUNT=6
 
 check_deps() {
     for cmd in jq curl grep sed mktemp shuf head; do
-        if ! command -v "$cmd" &> /dev/null; then
+        if ! command -v "$cmd" >/dev/null 2>&1; then
             echo -e "${RED}错误: 命令 '$cmd' 未找到. 请先安装它.${NC}"
             exit 1
         fi
@@ -45,18 +45,21 @@ get_all_optimized_ips() {
         paste -d' ' <(echo "$ips") <(echo "$isps") >> "$paired_data_file"
     }
 
-    parse_url "$url_v4" "IPv4"; parse_url "$url_v6" "IPv6"
+    parse_url "$url_v4" "IPv4"
+    parse_url "$url_v6" "IPv6"
 
     if ! [ -s "$paired_data_file" ]; then echo -e "${RED}无法从任何来源解析出优选 IP 地址.${NC}"; return 1; fi
 
-    declare -g -a ip_list isp_list; local shuffled_pairs
+    declare -g -a ip_list isp_list
+    local shuffled_pairs
     mapfile -t shuffled_pairs < <(shuf "$paired_data_file")
     for pair in "${shuffled_pairs[@]}"; do
         ip_list+=("$(echo "$pair" | cut -d' ' -f1)")
         isp_list+=("$(echo "$pair" | cut -d' ' -f2-)")
     done
     if [ ${#ip_list[@]} -eq 0 ]; then echo -e "${RED}解析成功, 但未找到任何有效的 IP 地址.${NC}"; return 1; fi
-    echo -e "${GREEN}成功合并获取 ${#ip_list[@]} 个优选 IP 地址, 列表已随机打乱.${NC}"; return 0
+    echo -e "${GREEN}成功合并获取 ${#ip_list[@]} 个优选 IP 地址, 列表已随机打乱.${NC}"
+    return 0
 }
 
 # --- VLESS REALITY 解析并生成函数 ---
@@ -66,11 +69,10 @@ generate_reality_nodes() {
     echo -e "\n${YELLOW}--- 正在解析 VLESS Reality 配置: $conf_tag ---${NC}"
 
     # 从JSON中提取配置
-    local uuid=$(jq -r '.inbounds[0].users[0].uuid' "$conf_path")
-    local port=$(jq -r '.inbounds[0].listen_port' "$conf_path")
-    local sni=$(jq -r '.inbounds[0].tls.server_name' "$conf_path")
-    # 默认 flow 为 xtls-rprx-vision
-    local flow=$(jq -r '.inbounds[0].users[0].flow' "$conf_path" | grep -v '^null$' || echo "xtls-rprx-vision") 
+    local uuid=$(jq -r '.inbounds[0].users[0].uuid' "$conf_path" 2>/dev/null)
+    local port=$(jq -r '.inbounds[0].listen_port' "$conf_path" 2>/dev/null)
+    local sni=$(jq -r '.inbounds[0].tls.server_name' "$conf_path" 2>/dev/null)
+    local flow=$(jq -r '.inbounds[0].users[0].flow' "$conf_path" 2>/dev/null || echo "xtls-rprx-vision")
 
     # 从文件头注释中提取 Public Key
     local public_key=""
@@ -89,14 +91,12 @@ generate_reality_nodes() {
 
     echo "---"; echo -e "${YELLOW}开始生成 ${num_to_generate} 个 ${conf_tag} 优选链接:${NC}"
 
-    # 循环次数被 num_to_generate 限制
     for ((i=0; i<$num_to_generate; i++)); do
         local current_ip=${ip_list[$i]}
         local isp_name=${isp_list[$i]}
         
         local new_remark="${conf_tag}-${isp_name}"
         
-        # 构造 VLESS Reality URI
         local new_url="vless://${uuid}@${current_ip}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${public_key}"
         
         if [ -n "$flow" ]; then
@@ -110,39 +110,34 @@ generate_reality_nodes() {
     return 0
 }
 
-
 # --- VLESS WS-TLS 解析并生成函数 ---
 generate_ws_tls_nodes() {
     local conf_path="$1"; local conf_tag="$2"; local num_to_generate="$3"
     
     echo -e "\n${YELLOW}--- 正在解析 VLESS WS-TLS 配置: $conf_tag ---${NC}"
 
-    # 从JSON中提取配置
-    local uuid=$(jq -r '.inbounds[0].users[0].uuid' "$conf_path")
-    local port=$(jq -r '.inbounds[0].listen_port' "$conf_path")
-    local host=$(jq -r '.inbounds[0].tls.server_name' "$conf_path")
-    local path=$(jq -r '.inbounds[0].transport.path' "$conf_path")
+    local uuid=$(jq -r '.inbounds[0].users[0].uuid' "$conf_path" 2>/dev/null)
+    local port=$(jq -r '.inbounds[0].listen_port' "$conf_path" 2>/dev/null)
+    local host=$(jq -r '.inbounds[0].tls.server_name' "$conf_path" 2>/dev/null)
+    local path=$(jq -r '.inbounds[0].transport.path' "$conf_path" 2>/dev/null)
     
     if [ -z "$uuid" ] || [ -z "$port" ] || [ -z "$host" ] || [ -z "$path" ]; then
         echo -e "${RED}❌ 无法从 $conf_tag 提取完整的 VLESS WS-TLS 配置 (UUID/Port/Host/Path).${NC}"
         return 1
     fi
 
-    # 清理路径 (确保 URL-safe)
-    path=$(echo "$path" | sed 's/^\///') # 移除开头的 /
+    path=$(echo "$path" | sed 's/^\///')
 
     echo -e "  ✅ 基础参数提取成功: UUID=$uuid, Port=$port, Host=$host, Path=/$path"
 
     echo "---"; echo -e "${YELLOW}开始生成 ${num_to_generate} 个 ${conf_tag} 优选链接:${NC}"
 
-    # 循环次数被 num_to_generate 限制
     for ((i=0; i<$num_to_generate; i++)); do
         local current_ip=${ip_list[$i]}
         local isp_name=${isp_list[$i]}
         
         local new_remark="${conf_tag}-${isp_name}"
         
-        # 构造 VLESS WS-TLS URI
         local new_url="vless://${uuid}@${current_ip}:${port}?security=tls&type=ws&host=${host}&path=/${path}#${new_remark}"
         
         echo "$new_url"
